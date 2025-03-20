@@ -21,5 +21,8 @@ namespace TodoApi.Models
 
     // For Stripe integration (stores Stripe Customer ID)
     public string? StripeCustomerId { get; set; }
+    public string? StripeSubscriptionId { get; set; }
+    public string? SubscriptionStatus { get; set; }
+    public DateTime? SubscriptionEndDate { get; set; }
   }
 }

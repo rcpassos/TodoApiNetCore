@@ -6,6 +6,8 @@ using Serilog;
 using TodoApi.Data;
 using TodoApi.Services;
 using Scalar.AspNetCore;
+using Microsoft.AspNetCore.RateLimiting;
+using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -26,6 +28,9 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 // Register our email service (SMTP)
 builder.Services.AddScoped<IEmailService, SmtpEmailService>();
+
+// Add this line to the service registrations
+builder.Services.AddScoped<IStripeService, StripeService>();
 
 // Configure JWT Authentication
 builder.Services.AddAuthentication(options =>
@@ -55,24 +60,21 @@ builder.Services.AddEndpointsApiExplorer();
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
 
+// For rate limiting
 builder.Services.AddRateLimiter(options =>
 {
-    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
+    options.AddFixedWindowLimiter("FixedPolicy", opt =>
     {
-        return RateLimitPartition.GetFixedWindowLimiter(
-            partitionKey: context.User.Identity?.Name ?? context.Request.Headers.Host.ToString(),
-            factory: partition => new FixedWindowRateLimiterOptions
-            {
-                AutoReplenishment = true,
-                PermitLimit = 100,
-                Window = TimeSpan.FromMinutes(1)
-            });
+        opt.Window = TimeSpan.FromMinutes(1);    // Time window of 1 minute
+        opt.PermitLimit = 100;                   // Allow 100 requests per minute
+        opt.QueueLimit = 2;                      // Queue limit of 2
+        opt.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
     });
 });
 
-builder.Services.AddHealthChecks()
-    .AddDbContextCheck<AppDbContext>()
-    .AddCheck<SmtpHealthCheck>("SmtpHealth");
+// For health checks, either remove AddDbContextCheck or add the package
+builder.Services.AddHealthChecks();
+    // .AddDbContextCheck<AppDbContext>(); // Comment this out for now
 
 var app = builder.Build();
 

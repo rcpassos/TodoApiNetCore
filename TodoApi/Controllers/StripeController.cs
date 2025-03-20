@@ -1,65 +1,171 @@
+using System.IO;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Stripe;
+using Stripe.Checkout; // Add this for Events class
 using TodoApi.Data;
 using TodoApi.DTOs;
+using TodoApi.Services;
+using Microsoft.EntityFrameworkCore;
+using TodoApi.Models; // Add this for WebhookEvent model
 
 namespace TodoApi.Controllers
 {
-  [Authorize]
-  [ApiController]
-  [Route("api/[controller]")]
-  public class StripeController(AppDbContext context) : ControllerBase
-  {
-    private readonly AppDbContext _context = context;
-
-    [HttpPost("subscribe")]
-    public async Task<IActionResult> Subscribe(SubscribeRequest request)
+    [ApiController]
+    [Route("api/[controller]")]
+    public class StripeController : ControllerBase
     {
-      // Get the current user
-      var userId = int.Parse(User.FindFirst("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier")?.Value!);
-      var user = await _context.Users.FindAsync(userId);
-      if (user == null) return Unauthorized();
+        private readonly AppDbContext _context;
+        private readonly IStripeService _stripeService;
+        private readonly IConfiguration _configuration;
+        private readonly ILogger<StripeController> _logger;
 
-      // Set Stripe API key (ideally, get from configuration)
-      StripeConfiguration.ApiKey = "your_stripe_secret_key";
+        public StripeController(
+            AppDbContext context,
+            IStripeService stripeService,
+            IConfiguration configuration,
+            ILogger<StripeController> logger)
+        {
+            _context = context;
+            _stripeService = stripeService;
+            _configuration = configuration;
+            _logger = logger;
+        }
 
-      // Create a Stripe customer if not exists
-      var customerService = new CustomerService();
-      Customer customer;
-      if (string.IsNullOrEmpty(user.StripeCustomerId))
-      {
-        var customerOptions = new CustomerCreateOptions { Email = user.Email };
-        customer = await customerService.CreateAsync(customerOptions);
-        user.StripeCustomerId = customer.Id;
-        await _context.SaveChangesAsync();
-      }
-      else
-      {
-        customer = await customerService.GetAsync(user.StripeCustomerId);
-      }
+        [Authorize]
+        [HttpPost("subscribe")]
+        public async Task<IActionResult> Subscribe(SubscribeRequest request)
+        {
+            // Get the current user
+            var userId = int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value!);
+            var user = await _context.Users.FindAsync(userId);
+            if (user == null) return Unauthorized();
 
-      // Create a subscription for the customer
-      var subscriptionOptions = new SubscriptionCreateOptions
-      {
-        Customer = customer.Id,
-        Items = new List<SubscriptionItemOptions>
+            try
+            {
+                // Get or create the Stripe customer
+                var customer = await _stripeService.GetOrCreateCustomerAsync(user);
+
+                // Create a subscription for the customer
+                var (subscription, clientSecret) = await _stripeService.CreateSubscriptionAsync(customer.Id, request.PriceId);
+
+                if (subscription.Status == "incomplete" && !string.IsNullOrEmpty(clientSecret))
                 {
-                    new SubscriptionItemOptions { Price = request.PriceId }
-                },
-        PaymentBehavior = "default_incomplete",
-        Expand = new List<string> { "latest_invoice.payment_intent" }
-      };
-      var subscriptionService = new SubscriptionService();
-      Subscription subscription = await subscriptionService.CreateAsync(subscriptionOptions);
+                    return Ok(new { RequiresAction = true, PaymentIntentClientSecret = clientSecret });
+                }
 
-      if (subscription.Status == "incomplete")
-      {
-        var paymentIntent = subscription.LatestInvoice?.PaymentIntent;
-        return Ok(new { RequiresAction = true, PaymentIntentClientSecret = paymentIntent?.ClientSecret });
-      }
+                // Update user subscription data immediately if active
+                if (subscription.Status == "active" || subscription.Status == "trialing")
+                {
+                    await _stripeService.HandleSubscriptionUpdatedAsync(subscription);
+                }
 
-      return Ok(new { Message = "Subscription created", SubscriptionId = subscription.Id });
+                return Ok(new { Message = "Subscription created", SubscriptionId = subscription.Id });
+            }
+            catch (StripeException ex)
+            {
+                _logger.LogError(ex, "Stripe error occurred");
+                return BadRequest(new { Error = ex.Message });
+            }
+        }
+
+        [HttpPost("webhook")]
+        public async Task<IActionResult> Webhook()
+        {
+            var json = await new StreamReader(HttpContext.Request.Body).ReadToEndAsync();
+            string endpointSecret = _configuration["Stripe:WebhookSecret"];
+
+            try
+            {
+                // Verify the webhook signature
+                var stripeEvent = EventUtility.ConstructEvent(
+                    json,
+                    Request.Headers["Stripe-Signature"],
+                    endpointSecret
+                );
+
+                // Idempotency check - prevent duplicate event processing
+                if (await EventAlreadyProcessed(stripeEvent.Id))
+                {
+                    return Ok();
+                }
+
+                // Handle the event based on its type
+                switch (stripeEvent.Type)
+                {
+                    case Events.CustomerSubscriptionCreated:
+                    case Events.CustomerSubscriptionUpdated:
+                        var subscription = stripeEvent.Data.Object as Subscription;
+                        if (subscription != null)
+                            await _stripeService.HandleSubscriptionUpdatedAsync(subscription);
+                        break;
+
+                    case Events.CustomerSubscriptionDeleted:
+                        var canceledSubscription = stripeEvent.Data.Object as Subscription;
+                        if (canceledSubscription != null)
+                            await _stripeService.HandleSubscriptionCanceledAsync(canceledSubscription);
+                        break;
+
+                    case Events.InvoicePaymentSucceeded:
+                        // Handle successful payment, maybe extend subscription
+                        var invoice = stripeEvent.Data.Object as Invoice;
+                        if (invoice?.Subscription != null)
+                        {
+                            var subscriptionId = invoice.SubscriptionId; // Use the proper property
+                            
+                            if (!string.IsNullOrEmpty(subscriptionId))
+                            {
+                                var subscriptionService = new SubscriptionService();
+                                var updatedSubscription = await subscriptionService.GetAsync(subscriptionId);
+                                await _stripeService.HandleSubscriptionUpdatedAsync(updatedSubscription);
+                            }
+                        }
+                        break;
+
+                    case Events.InvoicePaymentFailed:
+                        // Handle failed payment
+                        _logger.LogWarning($"Payment failed for invoice: {((Invoice)stripeEvent.Data.Object).Id}");
+                        break;
+
+                    default:
+                        _logger.LogInformation($"Unhandled event type: {stripeEvent.Type}");
+                        break;
+                }
+
+                // Record that we've processed this event
+                await RecordProcessedEvent(stripeEvent.Id);
+
+                return Ok();
+            }
+            catch (StripeException ex)
+            {
+                _logger.LogError(ex, "Stripe error occurred");
+                return BadRequest(new { Error = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error processing webhook");
+                return StatusCode(500);
+            }
+        }
+
+        private async Task<bool> EventAlreadyProcessed(string eventId)
+        {
+            // Check if we've already processed this event
+            return await _context.WebhookEvents.AnyAsync(e => e.EventId == eventId);
+        }
+
+        private async Task RecordProcessedEvent(string eventId)
+        {
+            // Record that we've processed this event
+            _context.WebhookEvents.Add(new WebhookEvent 
+            { 
+                EventId = eventId,
+                ProcessedAt = DateTime.UtcNow
+            });
+            
+            await _context.SaveChangesAsync();
+        }
     }
-  }
 }
