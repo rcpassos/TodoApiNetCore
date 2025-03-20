@@ -3,7 +3,7 @@
 
 ### DotnetCore ###
 secrets.json
-Logs/
+Logs/*
 
 # .NET Core build folders
 bin/
