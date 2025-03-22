@@ -10,6 +10,8 @@ using TodoApi.Services;
 using Microsoft.EntityFrameworkCore;
 using TodoApi.Models; // Add this for WebhookEvent model
 
+// TODO: some problems here
+
 namespace TodoApi.Controllers
 {
     [ApiController]
@@ -31,43 +33,6 @@ namespace TodoApi.Controllers
             _stripeService = stripeService;
             _configuration = configuration;
             _logger = logger;
-        }
-
-        [Authorize]
-        [HttpPost("subscribe")]
-        public async Task<IActionResult> Subscribe(SubscribeRequest request)
-        {
-            // Get the current user
-            var userId = int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value!);
-            var user = await _context.Users.FindAsync(userId);
-            if (user == null) return Unauthorized();
-
-            try
-            {
-                // Get or create the Stripe customer
-                var customer = await _stripeService.GetOrCreateCustomerAsync(user);
-
-                // Create a subscription for the customer
-                var (subscription, clientSecret) = await _stripeService.CreateSubscriptionAsync(customer.Id, request.PriceId);
-
-                if (subscription.Status == "incomplete" && !string.IsNullOrEmpty(clientSecret))
-                {
-                    return Ok(new { RequiresAction = true, PaymentIntentClientSecret = clientSecret });
-                }
-
-                // Update user subscription data immediately if active
-                if (subscription.Status == "active" || subscription.Status == "trialing")
-                {
-                    await _stripeService.HandleSubscriptionUpdatedAsync(subscription);
-                }
-
-                return Ok(new { Message = "Subscription created", SubscriptionId = subscription.Id });
-            }
-            catch (StripeException ex)
-            {
-                _logger.LogError(ex, "Stripe error occurred");
-                return BadRequest(new { Error = ex.Message });
-            }
         }
 
         [HttpPost("webhook")]
