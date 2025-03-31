@@ -1,6 +1,7 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -69,8 +70,22 @@ namespace TodoApi.Controllers
           claims: authClaims,
           signingCredentials: new SigningCredentials(authSigningKey, SecurityAlgorithms.HmacSha256)
       );
+      
+      var userResponse = new UserResponse
+      {
+        Id = user.Id,
+        Email = user.Email,
+        Role = user.Role,
+        StripeCustomerId = user.StripeCustomerId,
+        StripeSubscriptionId = user.StripeSubscriptionId,
+        SubscriptionStatus = user.SubscriptionStatus,
+        SubscriptionEndDate = user.SubscriptionEndDate
+      };
 
-      return Ok(new { Token = new JwtSecurityTokenHandler().WriteToken(token) });
+      return Ok(new { 
+        Token = new JwtSecurityTokenHandler().WriteToken(token),
+        User = userResponse
+      });
     }
 
     [HttpPost("forgot-password")]
@@ -105,6 +120,36 @@ namespace TodoApi.Controllers
       await _context.SaveChangesAsync();
 
       return Ok("Password has been reset successfully.");
+    }
+    
+    [HttpGet("me")]
+    [Authorize]
+    public async Task<IActionResult> GetCurrentUser()
+    {
+      var userIdClaim = User.FindFirst(ClaimTypes.NameIdentifier);
+      if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
+      {
+        return Unauthorized("Invalid authentication token.");
+      }
+
+      var user = await _context.Users.FindAsync(userId);
+      if (user == null)
+      {
+        return NotFound("User not found.");
+      }
+
+      var userResponse = new UserResponse
+      {
+        Id = user.Id,
+        Email = user.Email,
+        Role = user.Role,
+        StripeCustomerId = user.StripeCustomerId,
+        StripeSubscriptionId = user.StripeSubscriptionId,
+        SubscriptionStatus = user.SubscriptionStatus,
+        SubscriptionEndDate = user.SubscriptionEndDate
+      };
+
+      return Ok(userResponse);
     }
   }
 }
