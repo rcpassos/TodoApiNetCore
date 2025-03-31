@@ -4,6 +4,7 @@
 ### DotnetCore ###
 secrets.json
 Logs/*
+TestResults
 
 # .NET Core build folders
 bin/

@@ -103,13 +103,20 @@ namespace TodoApi.Services
             await _context.SaveChangesAsync();
             _logger.LogInformation($"Marked subscription as canceled for user {user.Id}");
         }
+        
+        public Event ConstructEvent(string json, string signature, string secret)
+        {
+            // Use the Stripe EventUtility to construct the event
+            return EventUtility.ConstructEvent(json, signature, secret);
+        }
+        
+        public async Task<Subscription> GetSubscriptionAsync(string subscriptionId)
+        {
+            // Use the Stripe SubscriptionService to get the subscription
+            var subscriptionService = new SubscriptionService();
+            return await subscriptionService.GetAsync(subscriptionId);
+        }
     }
 
-    public interface IStripeService
-    {
-        Task<Customer> GetOrCreateCustomerAsync(User user);
-        Task<(Subscription, string?)> CreateSubscriptionAsync(string customerId, string priceId);
-        Task HandleSubscriptionUpdatedAsync(Subscription subscription);
-        Task HandleSubscriptionCanceledAsync(Subscription subscription);
-    }
+    // Moving IStripeService to its own file
 }
